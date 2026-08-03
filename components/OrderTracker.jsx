@@ -32,25 +32,71 @@ const todayKey = () => {
   return `${d.getFullYear()}-${m}-${day}`;
 };
 
-const safeGet = async (key) => {
+// --- การเรียก API แต่ละออเดอร์แยกกัน (ไม่ใช่อ่าน-แก้-เขียนทั้งก้อน)
+// เพื่อให้หลายเครื่องแก้ไขพร้อมกันได้โดยไม่ทับข้อมูลกันเอง ---
+
+const loadOrders = async (date) => {
   try {
-    const res = await fetch(`/api/store?key=${encodeURIComponent(key)}`);
-    if (!res.ok) return null;
+    const res = await fetch(`/api/orders?date=${date}`);
     const data = await res.json();
-    return data.value ?? null;
-  } catch {
+    const list = data.orders || [];
+    return list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  } catch (e) {
+    console.error(e);
+    return [];
+  }
+};
+const saveOrderToServer = async (date, order) => {
+  try {
+    await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, order }),
+    });
+  } catch (e) {
+    console.error('บันทึกออเดอร์ไม่สำเร็จ', e);
+  }
+};
+const deleteOrderFromServer = async (date, orderId) => {
+  try {
+    await fetch('/api/orders', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, orderId }),
+    });
+  } catch (e) {
+    console.error('ลบออเดอร์ไม่สำเร็จ', e);
+  }
+};
+const loadSummary = async () => {
+  try {
+    const res = await fetch('/api/summary');
+    const data = await res.json();
+    return data.summaries || [];
+  } catch (e) {
+    console.error(e);
+    return [];
+  }
+};
+const loadMenu = async () => {
+  try {
+    const res = await fetch('/api/menu');
+    const data = await res.json();
+    return data.menu ?? null;
+  } catch (e) {
+    console.error(e);
     return null;
   }
 };
-const safeSet = async (key, value) => {
+const saveMenuToServer = async (menu) => {
   try {
-    await fetch('/api/store', {
+    await fetch('/api/menu', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value }),
+      body: JSON.stringify({ menu }),
     });
   } catch (e) {
-    console.error('บันทึกข้อมูลไม่สำเร็จ', e);
+    console.error('บันทึกเมนูไม่สำเร็จ', e);
   }
 };
 
@@ -74,22 +120,36 @@ export default function OrderTracker() {
 
   useEffect(() => {
     (async () => {
-      const today = todayKey();
       const [todayOrders, summaries, menuItems] = await Promise.all([
-        safeGet(`orders:${today}`),
-        safeGet('daily-summaries'),
-        safeGet('menu-items'),
+        loadOrders(todayKey()),
+        loadSummary(),
+        loadMenu(),
       ]);
-      if (todayOrders) {
-        setOrders(todayOrders);
-        const maxTicket = todayOrders.reduce((max, o) => Math.max(max, o.ticketNo || 0), 0);
-        setTicketNo(maxTicket + 1);
-      }
-      if (summaries) setDailySummaries(summaries);
+      setOrders(todayOrders);
+      setDailySummaries(summaries);
       if (menuItems) setMenu(menuItems);
+      const maxTicket = todayOrders.reduce((max, o) => Math.max(max, o.ticketNo || 0), 0);
+      setTicketNo(maxTicket + 1);
       setLoading(false);
     })();
   }, []);
+
+  // เช็คตั๋วออเดอร์ใหม่จากเซิร์ฟเวอร์ทุก 15 วินาที เผื่อหน้าจอเปิดค้างไว้นานๆ
+  // (เช่น เปิดทิ้งไว้ที่หน้าเคาน์เตอร์ หรือมีหลายเครื่องใช้พร้อมกัน)
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const fresh = await loadOrders(todayKey());
+      setOrders(fresh);
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // อัปเดตสรุปยอดใหม่ทุกครั้งที่เข้าแท็บนี้ (ไม่ต้องดึงตลอดเวลาเหมือนตั๋วออเดอร์ เพราะดูไม่บ่อยเท่า)
+  useEffect(() => {
+    if (tab === 'summary') {
+      loadSummary().then(setDailySummaries);
+    }
+  }, [tab]);
 
   const addToCart = (id) => setCart(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
   const removeFromCart = (id) => setCart(prev => {
@@ -110,7 +170,7 @@ export default function OrderTracker() {
     if (cartItems.length === 0) return;
     const today = todayKey();
     const newOrder = {
-      id: Date.now(),
+      id: String(Date.now()),
       ticketNo,
       customerName: customerName.trim() || `โต๊ะ/ลูกค้า ${ticketNo}`,
       items: cartItems,
@@ -120,50 +180,25 @@ export default function OrderTracker() {
       total: cartTotal,
       createdAt: new Date().toISOString(),
     };
-    const updatedOrders = [newOrder, ...orders];
-    setOrders(updatedOrders);
+    setOrders(prev => [newOrder, ...prev]);
     setTicketNo(n => n + 1);
     setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in');
     setTab('list');
-
-    const idx = dailySummaries.findIndex(d => d.date === today);
-    const updatedSummaries = idx >= 0
-      ? dailySummaries.map((d, i) => i === idx ? { ...d, total: d.total + cartTotal, count: d.count + 1 } : d)
-      : [{ date: today, total: cartTotal, count: 1 }, ...dailySummaries];
-    setDailySummaries(updatedSummaries);
-
-    await Promise.all([
-      safeSet(`orders:${today}`, updatedOrders),
-      safeSet('daily-summaries', updatedSummaries),
-    ]);
+    await saveOrderToServer(today, newOrder);
   };
 
   const advanceStatus = async (id) => {
-    const updatedOrders = orders.map(o => {
-      if (o.id !== id) return o;
-      const i = statusFlow.indexOf(o.status);
-      return { ...o, status: statusFlow[Math.min(i + 1, statusFlow.length - 1)] };
-    });
-    setOrders(updatedOrders);
-    await safeSet(`orders:${todayKey()}`, updatedOrders);
+    const order = orders.find(o => o.id === id);
+    if (!order) return;
+    const i = statusFlow.indexOf(order.status);
+    const updatedOrder = { ...order, status: statusFlow[Math.min(i + 1, statusFlow.length - 1)] };
+    setOrders(prev => prev.map(o => (o.id === id ? updatedOrder : o)));
+    await saveOrderToServer(todayKey(), updatedOrder);
   };
 
   const deleteOrder = async (id) => {
-    const target = orders.find(o => o.id === id);
-    if (!target) return;
-    const today = todayKey();
-    const updatedOrders = orders.filter(o => o.id !== id);
-    setOrders(updatedOrders);
-
-    const updatedSummaries = dailySummaries.map(d =>
-      d.date === today ? { ...d, total: d.total - target.total, count: Math.max(0, d.count - 1) } : d
-    );
-    setDailySummaries(updatedSummaries);
-
-    await Promise.all([
-      safeSet(`orders:${today}`, updatedOrders),
-      safeSet('daily-summaries', updatedSummaries),
-    ]);
+    setOrders(prev => prev.filter(o => o.id !== id));
+    await deleteOrderFromServer(todayKey(), id);
   };
 
   const addMenuItem = async () => {
@@ -171,19 +206,19 @@ export default function OrderTracker() {
     const updated = [...menu, { id: Date.now(), name: newItemName.trim(), price: Number(newItemPrice) }];
     setMenu(updated);
     setNewItemName(''); setNewItemPrice('');
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
   };
   const startEdit = (item) => { setEditingId(item.id); setEditName(item.name); setEditPrice(String(item.price)); };
   const saveEdit = async (id) => {
     const updated = menu.map(m => m.id === id ? { ...m, name: editName.trim(), price: Number(editPrice) || 0 } : m);
     setMenu(updated);
     setEditingId(null);
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
   };
   const deleteMenuItem = async (id) => {
     const updated = menu.filter(m => m.id !== id);
     setMenu(updated);
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
   };
 
   const todayTotal = orders.reduce((s, o) => s + o.total, 0);
@@ -206,7 +241,7 @@ export default function OrderTracker() {
       <div className="border-b border-neutral-800 px-4 py-4 sm:px-6">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-lg bg-amber-400 flex items-center justify-center shrink-0">
+            <div className="w-9 h-9 rounded-lg bg-pink-400 flex items-center justify-center shrink-0">
               <Store className="w-5 h-5 text-neutral-950" strokeWidth={2.25} />
             </div>
             <div>
@@ -216,7 +251,7 @@ export default function OrderTracker() {
           </div>
           <div className="text-right">
             <p className="text-xs text-neutral-500">ยอดวันนี้</p>
-            <p className="font-mono font-semibold text-lg text-amber-400 tabular-nums">฿{todayTotal.toLocaleString()}</p>
+            <p className="font-mono font-semibold text-lg text-pink-400 tabular-nums">฿{todayTotal.toLocaleString()}</p>
           </div>
         </div>
       </div>
@@ -228,12 +263,12 @@ export default function OrderTracker() {
               key={t.key}
               onClick={() => setTab(t.key)}
               className={`flex-1 py-2 rounded-lg text-xs font-medium transition-colors ${
-                tab === t.key ? 'bg-amber-400 text-neutral-950' : 'text-neutral-400'
+                tab === t.key ? 'bg-pink-400 text-neutral-950' : 'text-neutral-400'
               }`}
             >
               {t.label}
               {t.key === 'list' && openCount > 0 && (
-                <span className={`ml-1 inline-flex items-center justify-center w-4 h-4 text-xs rounded-full ${tab === 'list' ? 'bg-neutral-950 text-amber-400' : 'bg-rose-500 text-white'}`}>
+                <span className={`ml-1 inline-flex items-center justify-center w-4 h-4 text-xs rounded-full ${tab === 'list' ? 'bg-neutral-950 text-pink-400' : 'bg-rose-500 text-white'}`}>
                   {openCount}
                 </span>
               )}
@@ -254,7 +289,7 @@ export default function OrderTracker() {
                 value={customerName}
                 onChange={e => setCustomerName(e.target.value)}
                 placeholder="ชื่อลูกค้า / โต๊ะ (ไม่บังคับ)"
-                className="w-full px-3 py-2.5 rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                className="w-full px-3 py-2.5 rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-pink-400"
               />
               <div className="flex gap-2">
                 {Object.entries(typeLabel).map(([key, label]) => (
@@ -262,7 +297,7 @@ export default function OrderTracker() {
                     key={key}
                     onClick={() => setOrderType(key)}
                     className={`flex-1 py-2 rounded-xl text-xs font-medium border transition-colors ${
-                      orderType === key ? 'bg-amber-400 border-amber-400 text-neutral-950' : 'border-neutral-800 text-neutral-400'
+                      orderType === key ? 'bg-pink-400 border-pink-400 text-neutral-950' : 'border-neutral-800 text-neutral-400'
                     }`}
                   >
                     {label}
@@ -280,7 +315,7 @@ export default function OrderTracker() {
                     <div
                       key={item.id}
                       className={`rounded-xl border p-3 ${
-                        qty > 0 ? 'bg-amber-50 border-amber-300' : 'bg-neutral-900 border-neutral-800'
+                        qty > 0 ? 'bg-pink-50 border-pink-300' : 'bg-neutral-900 border-neutral-800'
                       }`}
                     >
                       <p className={`text-sm font-medium leading-tight mb-0.5 ${qty > 0 ? 'text-neutral-900' : 'text-neutral-100'}`}>{item.name}</p>
@@ -289,14 +324,14 @@ export default function OrderTracker() {
                         <button
                           onClick={() => removeFromCart(item.id)}
                           disabled={qty === 0}
-                          className={`w-7 h-7 rounded-lg border flex items-center justify-center disabled:opacity-30 ${qty > 0 ? 'border-amber-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
+                          className={`w-7 h-7 rounded-lg border flex items-center justify-center disabled:opacity-30 ${qty > 0 ? 'border-pink-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
                         >
                           <Minus className="w-3.5 h-3.5" />
                         </button>
                         <span className={`text-sm font-mono font-semibold w-5 text-center ${qty > 0 ? 'text-neutral-900' : 'text-neutral-400'}`}>{qty}</span>
                         <button
                           onClick={() => addToCart(item.id)}
-                          className="w-7 h-7 rounded-lg bg-amber-400 text-neutral-950 flex items-center justify-center"
+                          className="w-7 h-7 rounded-lg bg-pink-400 text-neutral-950 flex items-center justify-center"
                         >
                           <Plus className="w-3.5 h-3.5" />
                         </button>
@@ -314,7 +349,7 @@ export default function OrderTracker() {
                 onChange={e => setNote(e.target.value)}
                 placeholder="เช่น ไม่ใส่ผัก, เผ็ดน้อย..."
                 rows={2}
-                className="w-full px-3 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none"
+                className="w-full px-3 py-2.5 rounded-xl bg-neutral-900 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-pink-400 resize-none"
               />
             </div>
           </div>
@@ -388,7 +423,7 @@ export default function OrderTracker() {
               <>
                 <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-4">
                   <p className="text-xs text-neutral-500 mb-0.5">รวมทั้งหมด {dailySummaries.length} วัน · {grandCount} ออเดอร์</p>
-                  <p className="font-mono font-semibold text-xl text-amber-400 tabular-nums">฿{grandTotal.toLocaleString()}</p>
+                  <p className="font-mono font-semibold text-xl text-pink-400 tabular-nums">฿{grandTotal.toLocaleString()}</p>
                 </div>
                 <div className="space-y-2">
                   {dailySummaries.slice().sort((a, b) => b.date.localeCompare(a.date)).map(d => (
@@ -415,16 +450,16 @@ export default function OrderTracker() {
                   value={newItemName}
                   onChange={e => setNewItemName(e.target.value)}
                   placeholder="ชื่อเมนู"
-                  className="flex-1 px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  className="flex-1 px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-pink-400"
                 />
                 <input
                   value={newItemPrice}
                   onChange={e => setNewItemPrice(e.target.value)}
                   placeholder="ราคา"
                   type="number"
-                  className="w-20 px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-amber-400"
+                  className="w-20 px-3 py-2 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm placeholder-neutral-600 focus:outline-none focus:ring-2 focus:ring-pink-400"
                 />
-                <button onClick={addMenuItem} className="px-4 py-2 rounded-lg bg-amber-400 text-neutral-950 text-sm font-medium">
+                <button onClick={addMenuItem} className="px-4 py-2 rounded-lg bg-pink-400 text-neutral-950 text-sm font-medium">
                   เพิ่ม
                 </button>
               </div>
@@ -435,8 +470,8 @@ export default function OrderTracker() {
                 <div key={item.id} className="p-3.5 flex items-center justify-between gap-2">
                   {editingId === item.id ? (
                     <>
-                      <input value={editName} onChange={e => setEditName(e.target.value)} className="flex-1 px-2 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400" />
-                      <input value={editPrice} onChange={e => setEditPrice(e.target.value)} type="number" className="w-16 px-2 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400" />
+                      <input value={editName} onChange={e => setEditName(e.target.value)} className="flex-1 px-2 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-pink-400" />
+                      <input value={editPrice} onChange={e => setEditPrice(e.target.value)} type="number" className="w-16 px-2 py-1.5 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-pink-400" />
                       <button onClick={() => saveEdit(item.id)} className="text-emerald-400 p-1.5">
                         <Check className="w-4 h-4" />
                       </button>
@@ -479,7 +514,7 @@ export default function OrderTracker() {
             </div>
             <button
               onClick={saveOrder}
-              className="w-full py-3 rounded-xl bg-amber-400 text-neutral-950 font-medium text-sm flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-pink-400 text-neutral-950 font-medium text-sm flex items-center justify-center gap-2"
             >
               <span>บันทึกออเดอร์</span>
               <span className="font-mono font-semibold">฿{cartTotal.toLocaleString()}</span>
