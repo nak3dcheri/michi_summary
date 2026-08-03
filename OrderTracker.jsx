@@ -72,23 +72,36 @@ export default function OrderTracker() {
   const [editName, setEditName] = useState('');
   const [editPrice, setEditPrice] = useState('');
 
+  // โหลดออเดอร์วันนี้ + สรุปยอด + เมนู ล่าสุดจากเซิร์ฟเวอร์ (ไม่แตะสถานะฟอร์มที่กำลังกรอกอยู่)
+  const refreshData = async () => {
+    const today = todayKey();
+    const [todayOrders, summaries, menuItems] = await Promise.all([
+      safeGet(`orders:${today}`),
+      safeGet('daily-summaries'),
+      safeGet('menu-items'),
+    ]);
+    if (todayOrders) setOrders(todayOrders);
+    if (summaries) setDailySummaries(summaries);
+    if (menuItems) setMenu(menuItems);
+    return todayOrders;
+  };
+
   useEffect(() => {
     (async () => {
-      const today = todayKey();
-      const [todayOrders, summaries, menuItems] = await Promise.all([
-        safeGet(`orders:${today}`),
-        safeGet('daily-summaries'),
-        safeGet('menu-items'),
-      ]);
+      const todayOrders = await refreshData();
       if (todayOrders) {
-        setOrders(todayOrders);
         const maxTicket = todayOrders.reduce((max, o) => Math.max(max, o.ticketNo || 0), 0);
         setTicketNo(maxTicket + 1);
       }
-      if (summaries) setDailySummaries(summaries);
-      if (menuItems) setMenu(menuItems);
       setLoading(false);
     })();
+  }, []);
+
+  // เช็คข้อมูลใหม่จากเซิร์ฟเวอร์ทุก 15 วินาที เผื่อหน้าจอเปิดค้างไว้นานๆ
+  // (เช่น เปิดทิ้งไว้ที่หน้าเคาน์เตอร์) จะได้เห็นออเดอร์/สถานะล่าสุดโดยไม่ต้องกด refresh เอง
+  useEffect(() => {
+    const interval = setInterval(refreshData, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   const addToCart = (id) => setCart(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
