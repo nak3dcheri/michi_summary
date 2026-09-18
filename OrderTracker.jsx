@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Minus, Trash2, Edit2, Check, ClipboardList, Store, TrendingUp } from 'lucide-react';
+import { Plus, Minus, Trash2, Edit2, Check, ClipboardList, Store, TrendingUp, ArrowLeft, ChevronUp, ChevronDown } from 'lucide-react';
 
 const defaultMenu = [
   { id: 1, name: 'ข้าวผัดกะเพราหมู', price: 45 },
@@ -32,25 +32,71 @@ const todayKey = () => {
   return `${d.getFullYear()}-${m}-${day}`;
 };
 
-const safeGet = async (key) => {
+// --- เรียก API แต่ละออเดอร์แยกกัน (ไม่ใช่อ่าน-แก้-เขียนทั้งก้อน)
+// เพื่อให้หลายเครื่องแก้ไขพร้อมกันได้โดยไม่ทับข้อมูลกันเอง ---
+
+const loadOrders = async (date) => {
   try {
-    const res = await fetch(`/api/store?key=${encodeURIComponent(key)}`);
-    if (!res.ok) return null;
+    const res = await fetch(`/api/orders?date=${date}`);
     const data = await res.json();
-    return data.value ?? null;
-  } catch {
+    const list = data.orders || [];
+    return list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  } catch (e) {
+    console.error(e);
+    return [];
+  }
+};
+const saveOrderToServer = async (date, order) => {
+  try {
+    await fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, order }),
+    });
+  } catch (e) {
+    console.error('บันทึกออเดอร์ไม่สำเร็จ', e);
+  }
+};
+const deleteOrderFromServer = async (date, orderId) => {
+  try {
+    await fetch('/api/orders', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, orderId }),
+    });
+  } catch (e) {
+    console.error('ลบออเดอร์ไม่สำเร็จ', e);
+  }
+};
+const loadSummary = async () => {
+  try {
+    const res = await fetch('/api/summary');
+    const data = await res.json();
+    return data.summaries || [];
+  } catch (e) {
+    console.error(e);
+    return [];
+  }
+};
+const loadMenu = async () => {
+  try {
+    const res = await fetch('/api/menu');
+    const data = await res.json();
+    return data.menu ?? null;
+  } catch (e) {
+    console.error(e);
     return null;
   }
 };
-const safeSet = async (key, value) => {
+const saveMenuToServer = async (menu) => {
   try {
-    await fetch('/api/store', {
+    await fetch('/api/menu', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value }),
+      body: JSON.stringify({ menu }),
     });
   } catch (e) {
-    console.error('บันทึกข้อมูลไม่สำเร็จ', e);
+    console.error('บันทึกเมนูไม่สำเร็จ', e);
   }
 };
 
@@ -72,37 +118,53 @@ export default function OrderTracker() {
   const [editName, setEditName] = useState('');
   const [editPrice, setEditPrice] = useState('');
 
-  // โหลดออเดอร์วันนี้ + สรุปยอด + เมนู ล่าสุดจากเซิร์ฟเวอร์ (ไม่แตะสถานะฟอร์มที่กำลังกรอกอยู่)
-  const refreshData = async () => {
-    const today = todayKey();
-    const [todayOrders, summaries, menuItems] = await Promise.all([
-      safeGet(`orders:${today}`),
-      safeGet('daily-summaries'),
-      safeGet('menu-items'),
-    ]);
-    if (todayOrders) setOrders(todayOrders);
-    if (summaries) setDailySummaries(summaries);
-    if (menuItems) setMenu(menuItems);
-    return todayOrders;
-  };
+  // ดูย้อนหลังของแต่ละวันจากแท็บสรุปยอด (ต่อให้ผ่านเที่ยงคืนไปแล้วก็เช็คได้ ไม่หาย)
+  const [viewingHistoryDate, setViewingHistoryDate] = useState(null);
+  const [historyOrders, setHistoryOrders] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const todayOrders = await refreshData();
-      if (todayOrders) {
-        const maxTicket = todayOrders.reduce((max, o) => Math.max(max, o.ticketNo || 0), 0);
-        setTicketNo(maxTicket + 1);
-      }
+      const [todayOrders, summaries, menuItems] = await Promise.all([
+        loadOrders(todayKey()),
+        loadSummary(),
+        loadMenu(),
+      ]);
+      setOrders(todayOrders);
+      setDailySummaries(summaries);
+      if (menuItems) setMenu(menuItems);
+      const maxTicket = todayOrders.reduce((max, o) => Math.max(max, o.ticketNo || 0), 0);
+      setTicketNo(maxTicket + 1);
       setLoading(false);
     })();
   }, []);
 
-  // เช็คข้อมูลใหม่จากเซิร์ฟเวอร์ทุก 15 วินาที เผื่อหน้าจอเปิดค้างไว้นานๆ
-  // (เช่น เปิดทิ้งไว้ที่หน้าเคาน์เตอร์) จะได้เห็นออเดอร์/สถานะล่าสุดโดยไม่ต้องกด refresh เอง
+  // เช็คตั๋วออเดอร์ใหม่จากเซิร์ฟเวอร์ทุก 15 วินาที เผื่อหน้าจอเปิดค้างไว้นานๆ
+  // (เช่น เปิดทิ้งไว้ที่หน้าเคาน์เตอร์ หรือมีหลายเครื่องใช้พร้อมกัน)
   useEffect(() => {
-    const interval = setInterval(refreshData, 15000);
+    const interval = setInterval(async () => {
+      const fresh = await loadOrders(todayKey());
+      setOrders(fresh);
+    }, 15000);
     return () => clearInterval(interval);
   }, []);
+
+  // อัปเดตสรุปยอดใหม่ทุกครั้งที่เข้าแท็บนี้ (ไม่ต้องดึงตลอดเวลาเหมือนตั๋วออเดอร์ เพราะดูไม่บ่อยเท่า)
+  useEffect(() => {
+    if (tab === 'summary') {
+      loadSummary().then(setDailySummaries);
+    } else {
+      setViewingHistoryDate(null);
+    }
+  }, [tab]);
+
+  const viewHistoryDay = async (date) => {
+    setViewingHistoryDate(date);
+    setHistoryLoading(true);
+    const list = await loadOrders(date);
+    setHistoryOrders(list);
+    setHistoryLoading(false);
+  };
 
   const addToCart = (id) => setCart(prev => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
   const removeFromCart = (id) => setCart(prev => {
@@ -110,6 +172,15 @@ export default function OrderTracker() {
     if (next[id] <= 1) delete next[id]; else next[id] -= 1;
     return next;
   });
+  const setQtyDirect = (id, rawValue) => {
+    const digits = rawValue.replace(/\D/g, '');
+    const num = digits === '' ? 0 : parseInt(digits, 10);
+    setCart(prev => {
+      const next = { ...prev };
+      if (num <= 0) delete next[id]; else next[id] = num;
+      return next;
+    });
+  };
 
   const cartItems = Object.entries(cart)
     .map(([id, qty]) => {
@@ -123,7 +194,7 @@ export default function OrderTracker() {
     if (cartItems.length === 0) return;
     const today = todayKey();
     const newOrder = {
-      id: Date.now(),
+      id: String(Date.now()),
       ticketNo,
       customerName: customerName.trim() || `โต๊ะ/ลูกค้า ${ticketNo}`,
       items: cartItems,
@@ -133,50 +204,25 @@ export default function OrderTracker() {
       total: cartTotal,
       createdAt: new Date().toISOString(),
     };
-    const updatedOrders = [newOrder, ...orders];
-    setOrders(updatedOrders);
+    setOrders(prev => [newOrder, ...prev]);
     setTicketNo(n => n + 1);
     setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in');
     setTab('list');
-
-    const idx = dailySummaries.findIndex(d => d.date === today);
-    const updatedSummaries = idx >= 0
-      ? dailySummaries.map((d, i) => i === idx ? { ...d, total: d.total + cartTotal, count: d.count + 1 } : d)
-      : [{ date: today, total: cartTotal, count: 1 }, ...dailySummaries];
-    setDailySummaries(updatedSummaries);
-
-    await Promise.all([
-      safeSet(`orders:${today}`, updatedOrders),
-      safeSet('daily-summaries', updatedSummaries),
-    ]);
+    await saveOrderToServer(today, newOrder);
   };
 
   const advanceStatus = async (id) => {
-    const updatedOrders = orders.map(o => {
-      if (o.id !== id) return o;
-      const i = statusFlow.indexOf(o.status);
-      return { ...o, status: statusFlow[Math.min(i + 1, statusFlow.length - 1)] };
-    });
-    setOrders(updatedOrders);
-    await safeSet(`orders:${todayKey()}`, updatedOrders);
+    const order = orders.find(o => o.id === id);
+    if (!order) return;
+    const i = statusFlow.indexOf(order.status);
+    const updatedOrder = { ...order, status: statusFlow[Math.min(i + 1, statusFlow.length - 1)] };
+    setOrders(prev => prev.map(o => (o.id === id ? updatedOrder : o)));
+    await saveOrderToServer(todayKey(), updatedOrder);
   };
 
   const deleteOrder = async (id) => {
-    const target = orders.find(o => o.id === id);
-    if (!target) return;
-    const today = todayKey();
-    const updatedOrders = orders.filter(o => o.id !== id);
-    setOrders(updatedOrders);
-
-    const updatedSummaries = dailySummaries.map(d =>
-      d.date === today ? { ...d, total: d.total - target.total, count: Math.max(0, d.count - 1) } : d
-    );
-    setDailySummaries(updatedSummaries);
-
-    await Promise.all([
-      safeSet(`orders:${today}`, updatedOrders),
-      safeSet('daily-summaries', updatedSummaries),
-    ]);
+    setOrders(prev => prev.filter(o => o.id !== id));
+    await deleteOrderFromServer(todayKey(), id);
   };
 
   const addMenuItem = async () => {
@@ -184,19 +230,27 @@ export default function OrderTracker() {
     const updated = [...menu, { id: Date.now(), name: newItemName.trim(), price: Number(newItemPrice) }];
     setMenu(updated);
     setNewItemName(''); setNewItemPrice('');
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
   };
   const startEdit = (item) => { setEditingId(item.id); setEditName(item.name); setEditPrice(String(item.price)); };
   const saveEdit = async (id) => {
     const updated = menu.map(m => m.id === id ? { ...m, name: editName.trim(), price: Number(editPrice) || 0 } : m);
     setMenu(updated);
     setEditingId(null);
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
   };
   const deleteMenuItem = async (id) => {
     const updated = menu.filter(m => m.id !== id);
     setMenu(updated);
-    await safeSet('menu-items', updated);
+    await saveMenuToServer(updated);
+  };
+  const moveMenuItem = async (index, direction) => {
+    const newIndex = index + direction;
+    if (newIndex < 0 || newIndex >= menu.length) return;
+    const updated = [...menu];
+    [updated[index], updated[newIndex]] = [updated[newIndex], updated[index]];
+    setMenu(updated);
+    await saveMenuToServer(updated);
   };
 
   const todayTotal = orders.reduce((s, o) => s + o.total, 0);
@@ -213,6 +267,43 @@ export default function OrderTracker() {
     { key: 'summary', label: 'สรุปยอด' },
     { key: 'menu', label: 'จัดการเมนู' },
   ];
+
+  // การ์ดออเดอร์แบบอ่านอย่างเดียว ใช้โชว์ log ย้อนหลังของวันที่เลือกในแท็บสรุปยอด
+  const renderReadOnlyTicket = (order) => {
+    const meta = statusMeta[order.status];
+    return (
+      <div key={order.id} className="bg-neutral-50 border-t-2 border-dashed border-neutral-300 rounded-2xl overflow-hidden">
+        <div className="p-4">
+          <div className="flex items-start justify-between mb-2.5">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-neutral-400">#{String(order.ticketNo).padStart(3, '0')}</span>
+                <p className="font-medium text-sm text-neutral-900">{order.customerName}</p>
+              </div>
+              <p className="text-xs text-neutral-500 mt-0.5">{fmtTime(order.createdAt)} · {typeLabel[order.orderType]}</p>
+            </div>
+            <span className={`text-xs font-medium px-3 py-1.5 rounded-full border -rotate-2 ${meta.badge}`}>
+              {meta.label}
+            </span>
+          </div>
+          <div className="space-y-0.5 mb-3 font-mono text-xs text-neutral-600">
+            {order.items.map((item, idx) => (
+              <div key={idx} className="flex justify-between">
+                <span>{item.name} ×{item.qty}</span>
+                <span>฿{item.price * item.qty}</span>
+              </div>
+            ))}
+          </div>
+          {order.note && (
+            <p className="text-xs text-neutral-600 bg-neutral-100 rounded-lg px-2.5 py-1.5 mb-3">{order.note}</p>
+          )}
+          <div className="pt-2 border-t border-dashed border-neutral-300">
+            <span className="font-mono font-semibold text-sm text-neutral-900">฿{order.total.toLocaleString()}</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-neutral-950 font-sans">
@@ -286,32 +377,39 @@ export default function OrderTracker() {
 
             <div>
               <h2 className="text-sm font-medium text-neutral-500 mb-2 px-1">เลือกรายการ</h2>
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-3 gap-1.5">
                 {menu.map(item => {
                   const qty = cart[item.id] || 0;
                   return (
                     <div
                       key={item.id}
-                      className={`rounded-xl border p-3 ${
+                      className={`rounded-lg border p-1.5 ${
                         qty > 0 ? 'bg-pink-50 border-pink-300' : 'bg-neutral-900 border-neutral-800'
                       }`}
                     >
-                      <p className={`text-sm font-medium leading-tight mb-0.5 ${qty > 0 ? 'text-neutral-900' : 'text-neutral-100'}`}>{item.name}</p>
-                      <p className={`text-xs font-mono mb-2 ${qty > 0 ? 'text-neutral-600' : 'text-neutral-500'}`}>฿{item.price}</p>
+                      <p className={`text-xs font-medium leading-tight mb-0.5 ${qty > 0 ? 'text-neutral-900' : 'text-neutral-100'}`}>{item.name}</p>
+                      <p className={`text-xs font-mono mb-1 ${qty > 0 ? 'text-neutral-600' : 'text-neutral-500'}`}>฿{item.price}</p>
                       <div className="flex items-center justify-between">
                         <button
                           onClick={() => removeFromCart(item.id)}
                           disabled={qty === 0}
-                          className={`w-7 h-7 rounded-lg border flex items-center justify-center disabled:opacity-30 ${qty > 0 ? 'border-pink-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
+                          className={`w-6 h-6 rounded-md border flex items-center justify-center shrink-0 disabled:opacity-30 ${qty > 0 ? 'border-pink-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
                         >
-                          <Minus className="w-3.5 h-3.5" />
+                          <Minus className="w-3 h-3" />
                         </button>
-                        <span className={`text-sm font-mono font-semibold w-5 text-center ${qty > 0 ? 'text-neutral-900' : 'text-neutral-400'}`}>{qty}</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={qty}
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => setQtyDirect(item.id, e.target.value)}
+                          className={`w-7 text-xs font-mono font-semibold text-center bg-transparent border-none focus:outline-none focus:ring-1 focus:ring-pink-400 rounded ${qty > 0 ? 'text-neutral-900' : 'text-neutral-400'}`}
+                        />
                         <button
                           onClick={() => addToCart(item.id)}
-                          className="w-7 h-7 rounded-lg bg-pink-400 text-neutral-950 flex items-center justify-center"
+                          className="w-6 h-6 rounded-md bg-pink-400 text-neutral-950 flex items-center justify-center shrink-0"
                         >
-                          <Plus className="w-3.5 h-3.5" />
+                          <Plus className="w-3 h-3" />
                         </button>
                       </div>
                     </div>
@@ -392,7 +490,21 @@ export default function OrderTracker() {
 
         {tab === 'summary' && (
           <div className="space-y-3">
-            {dailySummaries.length === 0 ? (
+            {viewingHistoryDate ? (
+              <div className="space-y-3">
+                <button onClick={() => setViewingHistoryDate(null)} className="text-xs text-neutral-400 hover:text-neutral-200 inline-flex items-center gap-1">
+                  <ArrowLeft className="w-3.5 h-3.5" /> กลับไปหน้าสรุปยอด
+                </button>
+                <h2 className="text-sm font-medium text-neutral-300 px-1">{fmtDate(viewingHistoryDate)}</h2>
+                {historyLoading ? (
+                  <p className="text-sm text-neutral-500 text-center py-10">กำลังโหลด...</p>
+                ) : historyOrders.length === 0 ? (
+                  <p className="text-sm text-neutral-500 text-center py-10">ไม่มีออเดอร์ในวันนี้</p>
+                ) : (
+                  historyOrders.map(renderReadOnlyTicket)
+                )}
+              </div>
+            ) : dailySummaries.length === 0 ? (
               <div className="text-center py-16">
                 <TrendingUp className="w-9 h-9 mx-auto mb-3 text-neutral-700" />
                 <p className="text-sm text-neutral-500">ยังไม่มีข้อมูลสรุปยอด บันทึกออเดอร์วันนี้ก่อนได้เลย</p>
@@ -403,15 +515,20 @@ export default function OrderTracker() {
                   <p className="text-xs text-neutral-500 mb-0.5">รวมทั้งหมด {dailySummaries.length} วัน · {grandCount} ออเดอร์</p>
                   <p className="font-mono font-semibold text-xl text-pink-400 tabular-nums">฿{grandTotal.toLocaleString()}</p>
                 </div>
+                <p className="text-xs text-neutral-600 px-1">แตะแต่ละวันเพื่อดูรายละเอียดออเดอร์วันนั้นย้อนหลังได้</p>
                 <div className="space-y-2">
                   {dailySummaries.slice().sort((a, b) => b.date.localeCompare(a.date)).map(d => (
-                    <div key={d.date} className="bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 flex items-center justify-between">
+                    <button
+                      key={d.date}
+                      onClick={() => viewHistoryDay(d.date)}
+                      className="w-full text-left bg-neutral-900 border border-neutral-800 rounded-xl px-4 py-3 flex items-center justify-between hover:border-pink-400 transition-colors"
+                    >
                       <div>
                         <p className="text-sm text-neutral-100">{fmtDate(d.date)}{d.date === todayKey() ? ' · วันนี้' : ''}</p>
                         <p className="text-xs text-neutral-500">{d.count} ออเดอร์</p>
                       </div>
                       <p className="font-mono font-semibold text-sm text-neutral-100 tabular-nums">฿{d.total.toLocaleString()}</p>
-                    </div>
+                    </button>
                   ))}
                 </div>
               </>
@@ -444,7 +561,7 @@ export default function OrderTracker() {
             </div>
 
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl divide-y divide-neutral-800">
-              {menu.map(item => (
+              {menu.map((item, index) => (
                 <div key={item.id} className="p-3.5 flex items-center justify-between gap-2">
                   {editingId === item.id ? (
                     <>
@@ -460,7 +577,13 @@ export default function OrderTracker() {
                         <p className="text-sm font-medium text-neutral-100">{item.name}</p>
                         <p className="text-xs font-mono text-neutral-500">฿{item.price}</p>
                       </div>
-                      <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-0.5">
+                        <button onClick={() => moveMenuItem(index, -1)} disabled={index === 0} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-20 p-1.5">
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => moveMenuItem(index, 1)} disabled={index === menu.length - 1} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-20 p-1.5">
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        </button>
                         <button onClick={() => startEdit(item)} className="text-neutral-500 hover:text-neutral-300 p-1.5">
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
