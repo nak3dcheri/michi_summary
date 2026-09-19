@@ -16,7 +16,7 @@ const defaultMenu = [
   { id: 10, name: 'น้ำเปล่า', price: 10 },
 ];
 
-const statusFlow = ['pending', 'preparing', 'ready', 'paid'];
+const statusFlow = ['paid', 'pending', 'preparing', 'ready'];
 const statusMeta = {
   pending:   { label: 'รอทำ',      badge: 'bg-rose-50 text-rose-700 border-rose-200' },
   preparing: { label: 'กำลังทำ',   badge: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -117,6 +117,7 @@ export default function OrderTracker() {
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [editPrice, setEditPrice] = useState('');
+  const [riderDrafts, setRiderDrafts] = useState({});
 
   // ดูย้อนหลังของแต่ละวันจากแท็บสรุปยอด (ต่อให้ผ่านเที่ยงคืนไปแล้วก็เช็คได้ ไม่หาย)
   const [viewingHistoryDate, setViewingHistoryDate] = useState(null);
@@ -172,6 +173,15 @@ export default function OrderTracker() {
     if (next[id] <= 1) delete next[id]; else next[id] -= 1;
     return next;
   });
+  const setQtyDirect = (id, rawValue) => {
+    const digits = rawValue.replace(/\D/g, '');
+    const num = digits === '' ? 0 : parseInt(digits, 10);
+    setCart(prev => {
+      const next = { ...prev };
+      if (num <= 0) delete next[id]; else next[id] = num;
+      return next;
+    });
+  };
 
   const cartItems = Object.entries(cart)
     .map(([id, qty]) => {
@@ -191,7 +201,7 @@ export default function OrderTracker() {
       items: cartItems,
       note: note.trim(),
       orderType,
-      status: 'pending',
+      status: 'paid',
       total: cartTotal,
       createdAt: new Date().toISOString(),
     };
@@ -214,6 +224,17 @@ export default function OrderTracker() {
   const deleteOrder = async (id) => {
     setOrders(prev => prev.filter(o => o.id !== id));
     await deleteOrderFromServer(todayKey(), id);
+  };
+
+  const saveRiderAssignment = async (id) => {
+    const draft = riderDrafts[id];
+    if (draft === undefined) return;
+    const order = orders.find(o => o.id === id);
+    if (!order) return;
+    const updatedOrder = { ...order, assignedRider: draft.trim() };
+    setOrders(prev => prev.map(o => (o.id === id ? updatedOrder : o)));
+    setRiderDrafts(prev => { const next = { ...prev }; delete next[id]; return next; });
+    await saveOrderToServer(todayKey(), updatedOrder);
   };
 
   const addMenuItem = async () => {
@@ -245,7 +266,7 @@ export default function OrderTracker() {
   };
 
   const todayTotal = orders.reduce((s, o) => s + o.total, 0);
-  const openCount = orders.filter(o => o.status !== 'paid').length;
+  const openCount = orders.filter(o => o.status !== 'ready').length;
   const fmtTime = (d) => new Date(d).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
   const fmtDate = (dateStr) => new Date(dateStr + 'T00:00:00').toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -287,6 +308,9 @@ export default function OrderTracker() {
           </div>
           {order.note && (
             <p className="text-xs text-neutral-600 bg-neutral-100 rounded-lg px-2.5 py-1.5 mb-3">{order.note}</p>
+          )}
+          {order.orderType === 'delivery' && order.assignedRider && (
+            <p className="text-xs text-neutral-500 mb-3">มอบหมาย: {order.assignedRider}</p>
           )}
           <div className="pt-2 border-t border-dashed border-neutral-300">
             <span className="font-mono font-semibold text-sm text-neutral-900">฿{order.total.toLocaleString()}</span>
@@ -368,30 +392,37 @@ export default function OrderTracker() {
 
             <div>
               <h2 className="text-sm font-medium text-neutral-500 mb-2 px-1">เลือกรายการ</h2>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-1.5">
                 {menu.map(item => {
                   const qty = cart[item.id] || 0;
                   return (
                     <div
                       key={item.id}
-                      className={`rounded-lg border p-2 ${
+                      className={`rounded-lg border p-1.5 ${
                         qty > 0 ? 'bg-pink-50 border-pink-300' : 'bg-neutral-900 border-neutral-800'
                       }`}
                     >
                       <p className={`text-xs font-medium leading-tight mb-0.5 ${qty > 0 ? 'text-neutral-900' : 'text-neutral-100'}`}>{item.name}</p>
-                      <p className={`text-xs font-mono mb-1.5 ${qty > 0 ? 'text-neutral-600' : 'text-neutral-500'}`}>฿{item.price}</p>
+                      <p className={`text-xs font-mono mb-1 ${qty > 0 ? 'text-neutral-600' : 'text-neutral-500'}`}>฿{item.price}</p>
                       <div className="flex items-center justify-between">
                         <button
                           onClick={() => removeFromCart(item.id)}
                           disabled={qty === 0}
-                          className={`w-6 h-6 rounded-md border flex items-center justify-center disabled:opacity-30 ${qty > 0 ? 'border-pink-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
+                          className={`w-6 h-6 rounded-md border flex items-center justify-center shrink-0 disabled:opacity-30 ${qty > 0 ? 'border-pink-300 text-neutral-700' : 'border-neutral-700 text-neutral-500'}`}
                         >
                           <Minus className="w-3 h-3" />
                         </button>
-                        <span className={`text-xs font-mono font-semibold w-4 text-center ${qty > 0 ? 'text-neutral-900' : 'text-neutral-400'}`}>{qty}</span>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={qty}
+                          onFocus={(e) => e.target.select()}
+                          onChange={(e) => setQtyDirect(item.id, e.target.value)}
+                          className={`w-7 text-xs font-mono font-semibold text-center bg-transparent border-none focus:outline-none focus:ring-1 focus:ring-pink-400 rounded ${qty > 0 ? 'text-neutral-900' : 'text-neutral-400'}`}
+                        />
                         <button
                           onClick={() => addToCart(item.id)}
-                          className="w-6 h-6 rounded-md bg-pink-400 text-neutral-950 flex items-center justify-center"
+                          className="w-6 h-6 rounded-md bg-pink-400 text-neutral-950 flex items-center justify-center shrink-0"
                         >
                           <Plus className="w-3 h-3" />
                         </button>
@@ -454,11 +485,21 @@ export default function OrderTracker() {
                         <p className="text-xs text-neutral-600 bg-neutral-100 rounded-lg px-2.5 py-1.5 mb-3">{order.note}</p>
                       )}
 
+                      {order.orderType === 'delivery' && (
+                        <input
+                          value={riderDrafts[order.id] ?? order.assignedRider ?? ''}
+                          onChange={(e) => setRiderDrafts(prev => ({ ...prev, [order.id]: e.target.value }))}
+                          onBlur={() => saveRiderAssignment(order.id)}
+                          placeholder="มอบหมายไรเดอร์..."
+                          className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-neutral-100 border border-neutral-200 text-neutral-700 placeholder-neutral-400 mb-3 focus:outline-none focus:ring-1 focus:ring-pink-400"
+                        />
+                      )}
+
                       <div className="flex items-center justify-between pt-2 border-t border-dashed border-neutral-300">
                         <span className="font-mono font-semibold text-sm text-neutral-900">฿{order.total.toLocaleString()}</span>
                         <button
                           onClick={() => advanceStatus(order.id)}
-                          disabled={order.status === 'paid'}
+                          disabled={order.status === 'ready'}
                           className={`text-xs font-medium px-3 py-1.5 rounded-full border -rotate-2 disabled:cursor-default ${meta.badge}`}
                         >
                           {meta.label}
