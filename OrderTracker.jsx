@@ -16,7 +16,7 @@ const defaultMenu = [
   { id: 10, name: 'น้ำเปล่า', price: 10 },
 ];
 
-const statusFlow = ['pending', 'preparing', 'ready', 'paid'];
+const statusFlow = ['paid', 'pending', 'preparing', 'ready'];
 const statusMeta = {
   pending:   { label: 'รอทำ',      badge: 'bg-rose-50 text-rose-700 border-rose-200' },
   preparing: { label: 'กำลังทำ',   badge: 'bg-amber-50 text-amber-700 border-amber-200' },
@@ -111,12 +111,15 @@ export default function OrderTracker() {
   const [note, setNote] = useState('');
   const [orderType, setOrderType] = useState('dine-in');
   const [ticketNo, setTicketNo] = useState(1);
+  const [discountInput, setDiscountInput] = useState('');
+  const [discountType, setDiscountType] = useState('baht'); // 'baht' หรือ 'percent'
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemPrice, setNewItemPrice] = useState('');
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState('');
   const [editPrice, setEditPrice] = useState('');
+  const [riderDrafts, setRiderDrafts] = useState({});
 
   // ดูย้อนหลังของแต่ละวันจากแท็บสรุปยอด (ต่อให้ผ่านเที่ยงคืนไปแล้วก็เช็คได้ ไม่หาย)
   const [viewingHistoryDate, setViewingHistoryDate] = useState(null);
@@ -190,6 +193,32 @@ export default function OrderTracker() {
     .filter(Boolean);
   const cartTotal = cartItems.reduce((sum, i) => sum + i.price * i.qty, 0);
 
+  // ส่วนลด: ใส่เป็นบาท หรือเป็นเปอร์เซ็นต์ ปัดเป็นบาทเต็ม และลดได้ไม่เกินยอดรวม
+  const discountNum = parseInt(discountInput, 10) || 0;
+  const discountAmount = discountType === 'percent'
+    ? Math.round(cartTotal * Math.min(discountNum, 100) / 100)
+    : Math.min(discountNum, cartTotal);
+  const netTotal = Math.max(0, cartTotal - discountAmount);
+
+  const onDiscountChange = (raw) => {
+    let digits = raw.replace(/\D/g, '');
+    if (digits !== '') {
+      let n = parseInt(digits, 10);
+      if (discountType === 'percent') n = Math.min(n, 100);
+      digits = String(n);
+    }
+    setDiscountInput(digits);
+  };
+  const chooseDiscountType = (type) => {
+    setDiscountType(type);
+    if (type === 'percent' && parseInt(discountInput, 10) > 100) setDiscountInput('100');
+  };
+
+  // ถ้าตะกร้าว่างแล้ว ล้างส่วนลดที่ค้างอยู่ด้วย กันเผลอลดให้ออเดอร์ถัดไป
+  useEffect(() => {
+    if (cartItems.length === 0) setDiscountInput('');
+  }, [cartItems.length]);
+
   const saveOrder = async () => {
     if (cartItems.length === 0) return;
     const today = todayKey();
@@ -200,13 +229,17 @@ export default function OrderTracker() {
       items: cartItems,
       note: note.trim(),
       orderType,
-      status: 'pending',
-      total: cartTotal,
+      status: 'paid',
+      subtotal: cartTotal,
+      discount: discountAmount,
+      discountType,
+      discountValue: discountNum,
+      total: netTotal,
       createdAt: new Date().toISOString(),
     };
     setOrders(prev => [newOrder, ...prev]);
     setTicketNo(n => n + 1);
-    setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in');
+    setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in'); setDiscountInput('');
     setTab('list');
     await saveOrderToServer(today, newOrder);
   };
@@ -223,6 +256,17 @@ export default function OrderTracker() {
   const deleteOrder = async (id) => {
     setOrders(prev => prev.filter(o => o.id !== id));
     await deleteOrderFromServer(todayKey(), id);
+  };
+
+  const saveRiderAssignment = async (id) => {
+    const draft = riderDrafts[id];
+    if (draft === undefined) return;
+    const order = orders.find(o => o.id === id);
+    if (!order) return;
+    const updatedOrder = { ...order, assignedRider: draft.trim() };
+    setOrders(prev => prev.map(o => (o.id === id ? updatedOrder : o)));
+    setRiderDrafts(prev => { const next = { ...prev }; delete next[id]; return next; });
+    await saveOrderToServer(todayKey(), updatedOrder);
   };
 
   const addMenuItem = async () => {
@@ -254,7 +298,7 @@ export default function OrderTracker() {
   };
 
   const todayTotal = orders.reduce((s, o) => s + o.total, 0);
-  const openCount = orders.filter(o => o.status !== 'paid').length;
+  const openCount = orders.filter(o => o.status !== 'ready').length;
   const fmtTime = (d) => new Date(d).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
   const fmtDate = (dateStr) => new Date(dateStr + 'T00:00:00').toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' });
 
@@ -293,9 +337,18 @@ export default function OrderTracker() {
                 <span>฿{item.price * item.qty}</span>
               </div>
             ))}
+            {order.discount > 0 && (
+              <div className="flex justify-between text-neutral-500 pt-1">
+                <span>ส่วนลด{order.discountType === 'percent' ? ` ${order.discountValue}%` : ''}</span>
+                <span>-฿{order.discount.toLocaleString()}</span>
+              </div>
+            )}
           </div>
           {order.note && (
             <p className="text-xs text-neutral-600 bg-neutral-100 rounded-lg px-2.5 py-1.5 mb-3">{order.note}</p>
+          )}
+          {order.orderType === 'delivery' && order.assignedRider && (
+            <p className="text-xs text-neutral-500 mb-3">มอบหมาย: {order.assignedRider}</p>
           )}
           <div className="pt-2 border-t border-dashed border-neutral-300">
             <span className="font-mono font-semibold text-sm text-neutral-900">฿{order.total.toLocaleString()}</span>
@@ -346,7 +399,7 @@ export default function OrderTracker() {
         </div>
       </div>
 
-      <div className={`max-w-3xl mx-auto px-4 sm:px-6 py-5 ${tab === 'new' && cartItems.length > 0 ? 'pb-40' : 'pb-8'}`}>
+      <div className={`max-w-3xl mx-auto px-4 sm:px-6 py-5 ${tab === 'new' && cartItems.length > 0 ? 'pb-56' : 'pb-8'}`}>
         {loading ? (
           <p className="text-sm text-neutral-500 text-center py-16">กำลังโหลดข้อมูล...</p>
         ) : (
@@ -464,17 +517,33 @@ export default function OrderTracker() {
                             <span>฿{item.price * item.qty}</span>
                           </div>
                         ))}
+                        {order.discount > 0 && (
+                          <div className="flex justify-between text-neutral-500 pt-1">
+                            <span>ส่วนลด{order.discountType === 'percent' ? ` ${order.discountValue}%` : ''}</span>
+                            <span>-฿{order.discount.toLocaleString()}</span>
+                          </div>
+                        )}
                       </div>
 
                       {order.note && (
                         <p className="text-xs text-neutral-600 bg-neutral-100 rounded-lg px-2.5 py-1.5 mb-3">{order.note}</p>
                       )}
 
+                      {order.orderType === 'delivery' && (
+                        <input
+                          value={riderDrafts[order.id] ?? order.assignedRider ?? ''}
+                          onChange={(e) => setRiderDrafts(prev => ({ ...prev, [order.id]: e.target.value }))}
+                          onBlur={() => saveRiderAssignment(order.id)}
+                          placeholder="มอบหมายไรเดอร์..."
+                          className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-neutral-100 border border-neutral-200 text-neutral-700 placeholder-neutral-400 mb-3 focus:outline-none focus:ring-1 focus:ring-pink-400"
+                        />
+                      )}
+
                       <div className="flex items-center justify-between pt-2 border-t border-dashed border-neutral-300">
                         <span className="font-mono font-semibold text-sm text-neutral-900">฿{order.total.toLocaleString()}</span>
                         <button
                           onClick={() => advanceStatus(order.id)}
-                          disabled={order.status === 'paid'}
+                          disabled={order.status === 'ready'}
                           className={`text-xs font-medium px-3 py-1.5 rounded-full border -rotate-2 disabled:cursor-default ${meta.badge}`}
                         >
                           {meta.label}
@@ -605,7 +674,7 @@ export default function OrderTracker() {
       {tab === 'new' && cartItems.length > 0 && (
         <div className="fixed bottom-0 left-0 right-0 z-10 bg-neutral-50 border-t-2 border-dashed border-neutral-300">
           <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3.5">
-            <div className="max-h-20 overflow-y-auto mb-2.5 font-mono text-xs text-neutral-600 space-y-0.5">
+            <div className="max-h-16 overflow-y-auto mb-2 font-mono text-xs text-neutral-600 space-y-0.5">
               {cartItems.map(item => (
                 <div key={item.id} className="flex justify-between">
                   <span>{item.name} ×{item.qty}</span>
@@ -613,12 +682,44 @@ export default function OrderTracker() {
                 </div>
               ))}
             </div>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs text-neutral-600 shrink-0">ส่วนลด</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={discountInput}
+                placeholder="0"
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => onDiscountChange(e.target.value)}
+                className="w-16 text-xs font-mono text-right px-2 py-1.5 rounded-lg bg-white border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-pink-400"
+              />
+              <div className="flex rounded-lg border border-neutral-300 overflow-hidden text-xs font-medium shrink-0">
+                <button
+                  onClick={() => chooseDiscountType('baht')}
+                  className={`px-2.5 py-1.5 ${discountType === 'baht' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
+                >
+                  ฿
+                </button>
+                <button
+                  onClick={() => chooseDiscountType('percent')}
+                  className={`px-2.5 py-1.5 ${discountType === 'percent' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
+                >
+                  %
+                </button>
+              </div>
+            </div>
+            {discountAmount > 0 && (
+              <div className="flex justify-between font-mono text-xs text-neutral-500 mb-2">
+                <span>ยอดก่อนลด ฿{cartTotal.toLocaleString()}</span>
+                <span>ลด -฿{discountAmount.toLocaleString()}</span>
+              </div>
+            )}
             <button
               onClick={saveOrder}
               className="w-full py-3 rounded-xl bg-pink-400 text-neutral-950 font-medium text-sm flex items-center justify-center gap-2"
             >
               <span>บันทึกออเดอร์</span>
-              <span className="font-mono font-semibold">฿{cartTotal.toLocaleString()}</span>
+              <span className="font-mono font-semibold">฿{netTotal.toLocaleString()}</span>
             </button>
           </div>
         </div>
