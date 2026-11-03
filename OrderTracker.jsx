@@ -25,6 +25,9 @@ const statusMeta = {
 };
 const typeLabel = { 'dine-in': 'ทานที่ร้าน', takeaway: 'กลับบ้าน', delivery: 'เดลิเวอรี่' };
 
+// หมวดหมู่ตั้งต้นให้เลือกเร็วๆ (เพิ่มหมวดของตัวเองได้จากหน้าจัดการเมนู)
+const DEFAULT_CATEGORIES = ['อาหาร', 'เซต', 'น้ำ', 'ของคลายเครียด'];
+
 const todayKey = () => {
   const d = new Date();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -113,6 +116,9 @@ export default function OrderTracker() {
   const [ticketNo, setTicketNo] = useState(1);
   const [discountInput, setDiscountInput] = useState('');
   const [discountType, setDiscountType] = useState('baht'); // 'baht' หรือ 'percent'
+  const [activeCategory, setActiveCategory] = useState('all');
+  const [cartOpen, setCartOpen] = useState(false);
+  const [newItemCategory, setNewItemCategory] = useState('');
 
   const [newItemName, setNewItemName] = useState('');
   const [newItemPrice, setNewItemPrice] = useState('');
@@ -216,8 +222,33 @@ export default function OrderTracker() {
 
   // ถ้าตะกร้าว่างแล้ว ล้างส่วนลดที่ค้างอยู่ด้วย กันเผลอลดให้ออเดอร์ถัดไป
   useEffect(() => {
-    if (cartItems.length === 0) setDiscountInput('');
+    if (cartItems.length === 0) { setDiscountInput(''); setCartOpen(false); }
   }, [cartItems.length]);
+
+  const totalQty = cartItems.reduce((sum, i) => sum + i.qty, 0);
+
+  // หมวดหมู่: ดึงจากรายการเมนู เรียงหมวดตั้งต้นก่อน แล้วตามด้วยหมวดที่ตั้งเอง
+  const usedCategories = new Set(menu.map(m => m.category).filter(Boolean));
+  const categories = [
+    ...DEFAULT_CATEGORIES.filter(c => usedCategories.has(c)),
+    ...Array.from(usedCategories).filter(c => !DEFAULT_CATEGORIES.includes(c)),
+  ];
+  const categoryOptions = [
+    ...DEFAULT_CATEGORIES,
+    ...categories.filter(c => !DEFAULT_CATEGORIES.includes(c)),
+  ];
+  const hasUncategorized = menu.some(m => !m.category);
+  const chipKeys = ['all', ...categories, ...(categories.length > 0 && hasUncategorized ? ['__none__'] : [])];
+  const currentCategory = chipKeys.includes(activeCategory) ? activeCategory : 'all';
+  const visibleMenu = menu.filter(item => {
+    if (currentCategory === 'all') return true;
+    if (currentCategory === '__none__') return !item.category;
+    return item.category === currentCategory;
+  });
+  const cartCountFor = (key) => cartItems
+    .filter(i => key === 'all' || (key === '__none__' ? !i.category : i.category === key))
+    .reduce((sum, i) => sum + i.qty, 0);
+  const chipLabel = (key) => (key === 'all' ? 'ทั้งหมด' : key === '__none__' ? 'อื่นๆ' : key);
 
   const saveOrder = async () => {
     if (cartItems.length === 0) return;
@@ -239,7 +270,7 @@ export default function OrderTracker() {
     };
     setOrders(prev => [newOrder, ...prev]);
     setTicketNo(n => n + 1);
-    setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in'); setDiscountInput('');
+    setCustomerName(''); setCart({}); setNote(''); setOrderType('dine-in'); setDiscountInput(''); setCartOpen(false);
     setTab('list');
     await saveOrderToServer(today, newOrder);
   };
@@ -271,7 +302,7 @@ export default function OrderTracker() {
 
   const addMenuItem = async () => {
     if (!newItemName.trim() || !newItemPrice) return;
-    const updated = [...menu, { id: Date.now(), name: newItemName.trim(), price: Number(newItemPrice) }];
+    const updated = [...menu, { id: Date.now(), name: newItemName.trim(), price: Number(newItemPrice), category: newItemCategory }];
     setMenu(updated);
     setNewItemName(''); setNewItemPrice('');
     await saveMenuToServer(updated);
@@ -296,6 +327,31 @@ export default function OrderTracker() {
     setMenu(updated);
     await saveMenuToServer(updated);
   };
+  const setItemCategory = async (id, category) => {
+    const updated = menu.map(m => (m.id === id ? { ...m, category } : m));
+    setMenu(updated);
+    await saveMenuToServer(updated);
+  };
+
+  // ช่องเลือกหมวดหมู่ (ใช้ทั้งตอนเพิ่มเมนูใหม่ และในแต่ละรายการ)
+  const renderCategorySelect = (value, onChange) => (
+    <select
+      value={value || ''}
+      onChange={(e) => {
+        if (e.target.value === '__new__') {
+          const name = (window.prompt('ชื่อหมวดหมู่ใหม่') || '').trim();
+          if (name) onChange(name);
+        } else {
+          onChange(e.target.value);
+        }
+      }}
+      className="text-xs px-2 py-1 rounded-md bg-neutral-950 border border-neutral-800 text-neutral-300 focus:outline-none focus:ring-1 focus:ring-pink-400"
+    >
+      <option value="">ไม่ระบุหมวด</option>
+      {categoryOptions.map(c => <option key={c} value={c}>{c}</option>)}
+      <option value="__new__">+ หมวดหมู่ใหม่...</option>
+    </select>
+  );
 
   const todayTotal = orders.reduce((s, o) => s + o.total, 0);
   const openCount = orders.filter(o => o.status !== 'ready').length;
@@ -399,7 +455,7 @@ export default function OrderTracker() {
         </div>
       </div>
 
-      <div className={`max-w-3xl mx-auto px-4 sm:px-6 py-5 ${tab === 'new' && cartItems.length > 0 ? 'pb-56' : 'pb-8'}`}>
+      <div className={`max-w-3xl mx-auto px-4 sm:px-6 py-5 ${tab === 'new' && cartItems.length > 0 ? (cartOpen ? 'pb-80' : 'pb-28') : 'pb-8'}`}>
         {loading ? (
           <p className="text-sm text-neutral-500 text-center py-16">กำลังโหลดข้อมูล...</p>
         ) : (
@@ -430,8 +486,32 @@ export default function OrderTracker() {
 
             <div>
               <h2 className="text-sm font-medium text-neutral-500 mb-2 px-1">เลือกรายการ</h2>
-              <div className="grid grid-cols-3 gap-1.5">
-                {menu.map(item => {
+              {categories.length > 0 && (
+                <div className="sticky top-0 z-10 -mx-4 sm:-mx-6 px-4 sm:px-6 py-2 mb-1 bg-neutral-950 flex gap-1.5 overflow-x-auto">
+                  {chipKeys.map(key => {
+                    const count = cartCountFor(key);
+                    const active = currentCategory === key;
+                    return (
+                      <button
+                        key={key}
+                        onClick={() => setActiveCategory(key)}
+                        className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                          active ? 'bg-pink-400 border-pink-400 text-neutral-950' : 'border-neutral-700 text-neutral-300'
+                        }`}
+                      >
+                        {chipLabel(key)}
+                        {count > 0 && (
+                          <span className={`ml-1.5 inline-flex items-center justify-center h-4 px-1.5 text-xs rounded-full ${active ? 'bg-neutral-950 text-pink-400' : 'bg-pink-400 text-neutral-950'}`}>
+                            {count}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5">
+                {visibleMenu.map(item => {
                   const qty = cart[item.id] || 0;
                   return (
                     <div
@@ -627,6 +707,10 @@ export default function OrderTracker() {
                   เพิ่ม
                 </button>
               </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-neutral-500">หมวดหมู่</span>
+                {renderCategorySelect(newItemCategory, setNewItemCategory)}
+              </div>
             </div>
 
             <div className="bg-neutral-900 border border-neutral-800 rounded-2xl divide-y divide-neutral-800">
@@ -642,9 +726,10 @@ export default function OrderTracker() {
                     </>
                   ) : (
                     <>
-                      <div>
+                      <div className="min-w-0">
                         <p className="text-sm font-medium text-neutral-100">{item.name}</p>
-                        <p className="text-xs font-mono text-neutral-500">฿{item.price}</p>
+                        <p className="text-xs font-mono text-neutral-500 mb-1">฿{item.price}</p>
+                        {renderCategorySelect(item.category, (c) => setItemCategory(item.id, c))}
                       </div>
                       <div className="flex items-center gap-0.5">
                         <button onClick={() => moveMenuItem(index, -1)} disabled={index === 0} className="text-neutral-500 hover:text-neutral-300 disabled:opacity-20 p-1.5">
@@ -672,55 +757,70 @@ export default function OrderTracker() {
       </div>
 
       {tab === 'new' && cartItems.length > 0 && (
-        <div className="fixed bottom-0 left-0 right-0 z-10 bg-neutral-50 border-t-2 border-dashed border-neutral-300">
-          <div className="max-w-3xl mx-auto px-4 sm:px-6 py-3.5">
-            <div className="max-h-16 overflow-y-auto mb-2 font-mono text-xs text-neutral-600 space-y-0.5">
-              {cartItems.map(item => (
-                <div key={item.id} className="flex justify-between">
-                  <span>{item.name} ×{item.qty}</span>
-                  <span>฿{item.price * item.qty}</span>
+        <div className="fixed bottom-0 left-0 right-0 z-20 bg-neutral-50 border-t-2 border-dashed border-neutral-300">
+          <div className="max-w-3xl mx-auto px-4 sm:px-6">
+            {cartOpen && (
+              <div className="pt-3 pb-1 space-y-2">
+                <div className="max-h-40 overflow-y-auto font-mono text-xs text-neutral-600 space-y-0.5">
+                  {cartItems.map(item => (
+                    <div key={item.id} className="flex justify-between">
+                      <span>{item.name} ×{item.qty}</span>
+                      <span>฿{item.price * item.qty}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs text-neutral-600 shrink-0">ส่วนลด</span>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={discountInput}
-                placeholder="0"
-                onFocus={(e) => e.target.select()}
-                onChange={(e) => onDiscountChange(e.target.value)}
-                className="w-16 text-xs font-mono text-right px-2 py-1.5 rounded-lg bg-white border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-pink-400"
-              />
-              <div className="flex rounded-lg border border-neutral-300 overflow-hidden text-xs font-medium shrink-0">
-                <button
-                  onClick={() => chooseDiscountType('baht')}
-                  className={`px-2.5 py-1.5 ${discountType === 'baht' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
-                >
-                  ฿
-                </button>
-                <button
-                  onClick={() => chooseDiscountType('percent')}
-                  className={`px-2.5 py-1.5 ${discountType === 'percent' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
-                >
-                  %
-                </button>
-              </div>
-            </div>
-            {discountAmount > 0 && (
-              <div className="flex justify-between font-mono text-xs text-neutral-500 mb-2">
-                <span>ยอดก่อนลด ฿{cartTotal.toLocaleString()}</span>
-                <span>ลด -฿{discountAmount.toLocaleString()}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-neutral-600 shrink-0">ส่วนลด</span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={discountInput}
+                    placeholder="0"
+                    onFocus={(e) => e.target.select()}
+                    onChange={(e) => onDiscountChange(e.target.value)}
+                    className="w-16 text-xs font-mono text-right px-2 py-1.5 rounded-lg bg-white border border-neutral-300 text-neutral-900 placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-pink-400"
+                  />
+                  <div className="flex rounded-lg border border-neutral-300 overflow-hidden text-xs font-medium shrink-0">
+                    <button
+                      onClick={() => chooseDiscountType('baht')}
+                      className={`px-2.5 py-1.5 ${discountType === 'baht' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
+                    >
+                      ฿
+                    </button>
+                    <button
+                      onClick={() => chooseDiscountType('percent')}
+                      className={`px-2.5 py-1.5 ${discountType === 'percent' ? 'bg-pink-400 text-neutral-950' : 'bg-white text-neutral-500'}`}
+                    >
+                      %
+                    </button>
+                  </div>
+                </div>
+                {discountAmount > 0 && (
+                  <div className="flex justify-between font-mono text-xs text-neutral-500">
+                    <span>ยอดก่อนลด ฿{cartTotal.toLocaleString()}</span>
+                    <span>ลด -฿{discountAmount.toLocaleString()}</span>
+                  </div>
+                )}
               </div>
             )}
-            <button
-              onClick={saveOrder}
-              className="w-full py-3 rounded-xl bg-pink-400 text-neutral-950 font-medium text-sm flex items-center justify-center gap-2"
-            >
-              <span>บันทึกออเดอร์</span>
-              <span className="font-mono font-semibold">฿{netTotal.toLocaleString()}</span>
-            </button>
+            <div className="flex items-center gap-3 py-2.5">
+              <button onClick={() => setCartOpen(o => !o)} className="flex-1 min-w-0 text-left">
+                <span className="flex items-center gap-1 text-xs text-neutral-500">
+                  {cartOpen ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronUp className="w-3.5 h-3.5 shrink-0" />}
+                  <span className="truncate">
+                    {cartOpen ? 'ซ่อนรายการ' : `${totalQty} รายการ`}
+                    {!cartOpen && (discountAmount > 0 ? ` · ลด ฿${discountAmount.toLocaleString()}` : ' · แตะเพื่อดูรายการ/ใส่ส่วนลด')}
+                  </span>
+                </span>
+                <span className="block font-mono font-semibold text-base text-neutral-900">฿{netTotal.toLocaleString()}</span>
+              </button>
+              <button
+                onClick={saveOrder}
+                className="shrink-0 px-5 py-3 rounded-xl bg-pink-400 text-neutral-950 font-medium text-sm"
+              >
+                บันทึกออเดอร์
+              </button>
+            </div>
           </div>
         </div>
       )}
